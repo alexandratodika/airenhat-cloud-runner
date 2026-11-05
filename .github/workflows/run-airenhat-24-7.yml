@@ -35,13 +35,55 @@ jobs:
           sudo chmod +x /usr/local/bin/cloudflared
 
           git clone https://x-access-token:${PAT_TOKEN}@github.com/alexandratodika/unified-tele-shop-bot.git airenhat
+          rm -rf /tmp/airenhat_state_sync
+          cp -a airenhat /tmp/airenhat_state_sync
+
           pip install --upgrade pip
           pip install -r airenhat/requirements.txt
 
           save_airenhat_state() {
             (
-              cd airenhat
-              python -c "import os, sqlite3; [(c := sqlite3.connect(f, timeout=15), c.execute('PRAGMA wal_checkpoint(TRUNCATE)'), c.close()) for f in ('shop_data.db',) if os.path.exists(f)]" 2>/dev/null || true
+              python - << 'PYEOF' 2>/dev/null || true
+          import glob, os, shutil, sqlite3
+
+          src_dir = "airenhat"
+          dst_dir = "/tmp/airenhat_state_sync"
+          os.makedirs(dst_dir, exist_ok=True)
+
+          for fname in ("shop_data.db", "thomap_userbot.session", "ads_userbot.session"):
+              sp = os.path.join(src_dir, fname)
+              dp = os.path.join(dst_dir, fname)
+              if not os.path.exists(sp):
+                  continue
+              try:
+                  src = sqlite3.connect(sp, timeout=15)
+                  try:
+                      src.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                  except Exception:
+                      pass
+                  tmp_dp = dp + ".bkp_tmp"
+                  if os.path.exists(tmp_dp):
+                      os.remove(tmp_dp)
+                  dst = sqlite3.connect(tmp_dp, timeout=15)
+                  src.backup(dst, pages=250, sleep=0.005)
+                  dst.close()
+                  src.close()
+                  os.replace(tmp_dp, dp)
+              except Exception:
+                  try:
+                      shutil.copy2(sp, dp)
+                  except Exception:
+                      pass
+
+          for pat in ("canboso_cache.json", "roboticvn_cache.json", "auto_ads_config.json", "auto_ads_media.*"):
+              for sp in glob.glob(os.path.join(src_dir, pat)):
+                  if os.path.isfile(sp) and not sp.endswith(".tmp"):
+                      try:
+                          shutil.copy2(sp, os.path.join(dst_dir, os.path.basename(sp)))
+                      except Exception:
+                          pass
+          PYEOF
+              cd /tmp/airenhat_state_sync
               shopt -s nullglob
               for f in shop_data.db canboso_cache.json roboticvn_cache.json thomap_userbot.session auto_ads_config.json ads_userbot.session auto_ads_media.*; do
                 if [ -f "$f" ]; then
@@ -64,7 +106,7 @@ jobs:
             )
           }
 
-          # Auto-save database & catalog cache every 180 seconds
+          # Non-blocking online SQLite hot-backup & state sync every 180 seconds
           (
             while true; do
               sleep 180
@@ -137,11 +179,54 @@ jobs:
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           pkill -INT -f "python -X utf8" 2>/dev/null || true
-          sleep 2
+          sleep 3
           if [ -d "airenhat/.git" ]; then
+            if [ ! -d "/tmp/airenhat_state_sync/.git" ]; then
+              rm -rf /tmp/airenhat_state_sync
+              cp -a airenhat /tmp/airenhat_state_sync
+            fi
+            python - << 'PYEOF' 2>/dev/null || true
+          import glob, os, shutil, sqlite3
+
+          src_dir = "airenhat"
+          dst_dir = "/tmp/airenhat_state_sync"
+          os.makedirs(dst_dir, exist_ok=True)
+
+          for fname in ("shop_data.db", "thomap_userbot.session", "ads_userbot.session"):
+              sp = os.path.join(src_dir, fname)
+              dp = os.path.join(dst_dir, fname)
+              if not os.path.exists(sp):
+                  continue
+              try:
+                  src = sqlite3.connect(sp, timeout=15)
+                  try:
+                      src.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                  except Exception:
+                      pass
+                  tmp_dp = dp + ".bkp_tmp"
+                  if os.path.exists(tmp_dp):
+                      os.remove(tmp_dp)
+                  dst = sqlite3.connect(tmp_dp, timeout=15)
+                  src.backup(dst)
+                  dst.close()
+                  src.close()
+                  os.replace(tmp_dp, dp)
+              except Exception:
+                  try:
+                      shutil.copy2(sp, dp)
+                  except Exception:
+                      pass
+
+          for pat in ("canboso_cache.json", "roboticvn_cache.json", "auto_ads_config.json", "auto_ads_media.*"):
+              for sp in glob.glob(os.path.join(src_dir, pat)):
+                  if os.path.isfile(sp) and not sp.endswith(".tmp"):
+                      try:
+                          shutil.copy2(sp, os.path.join(dst_dir, os.path.basename(sp)))
+                      except Exception:
+                          pass
+          PYEOF
             (
-              cd airenhat
-              python -c "import os, sqlite3; [(c := sqlite3.connect(f, timeout=15), c.execute('PRAGMA wal_checkpoint(TRUNCATE)'), c.close()) for f in ('shop_data.db',) if os.path.exists(f)]" 2>/dev/null || true
+              cd /tmp/airenhat_state_sync
               shopt -s nullglob
               for f in shop_data.db canboso_cache.json roboticvn_cache.json thomap_userbot.session auto_ads_config.json ads_userbot.session auto_ads_media.*; do
                 if [ -f "$f" ]; then
