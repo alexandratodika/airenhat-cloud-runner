@@ -8,6 +8,9 @@ on:
   schedule:
     - cron: '*/30 * * * *'
 
+permissions:
+  contents: read
+
 concurrency:
   group: runtime-node-single-instance
   cancel-in-progress: false
@@ -17,10 +20,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
+      - name: Check out runner helpers
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+
+      - name: Verify state backup helpers
+        run: python -m unittest discover -s tests -v
 
       - name: Start Runtime Service
         env:
@@ -39,81 +50,28 @@ jobs:
           WF_FILE="$(echo 'cnVuLWFpcmVuaGF0LTI0LTcueW1s' | base64 -d)"
 
           git clone "https://x-access-token:${PAT_TOKEN}@github.com/${SRC_REPO}.git" airenhat >/tmp/runtime.log 2>&1
-          rm -rf /tmp/airenhat_state_sync
-          cp -a airenhat /tmp/airenhat_state_sync
 
           pip install --upgrade pip -q >>/tmp/runtime.log 2>&1
           pip install -r airenhat/requirements.txt -q >>/tmp/runtime.log 2>&1
 
+          cp -a "airenhat" "$RUNNER_TEMP/airenhat_state_sync"
+
           save_runtime_state() {
-            (
-              python - << 'PYEOF' 2>/dev/null || true
-          import glob, os, shutil, sqlite3
-
-          src_dir = "airenhat"
-          dst_dir = "/tmp/airenhat_state_sync"
-          os.makedirs(dst_dir, exist_ok=True)
-
-          for fname in ("shop_data.db", "thomap_userbot.session", "ads_userbot.session"):
-              sp = os.path.join(src_dir, fname)
-              dp = os.path.join(dst_dir, fname)
-              if not os.path.exists(sp):
-                  continue
-              try:
-                  src = sqlite3.connect(sp, timeout=15)
-                  try:
-                      src.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                  except Exception:
-                      pass
-                  tmp_dp = dp + ".bkp_tmp"
-                  if os.path.exists(tmp_dp):
-                      os.remove(tmp_dp)
-                  dst = sqlite3.connect(tmp_dp, timeout=15)
-                  src.backup(dst, pages=250, sleep=0.005)
-                  dst.close()
-                  src.close()
-                  os.replace(tmp_dp, dp)
-              except Exception:
-                  try:
-                      shutil.copy2(sp, dp)
-                  except Exception:
-                      pass
-
-          for pat in ("canboso_cache.json", "roboticvn_cache.json", "auto_ads_config.json", "auto_ads_media.*"):
-              for sp in glob.glob(os.path.join(src_dir, pat)):
-                  if os.path.isfile(sp) and not sp.endswith(".tmp"):
-                      try:
-                          shutil.copy2(sp, os.path.join(dst_dir, os.path.basename(sp)))
-                      except Exception:
-                          pass
-          PYEOF
-              cd /tmp/airenhat_state_sync
-              shopt -s nullglob
-              for f in shop_data.db canboso_cache.json roboticvn_cache.json thomap_userbot.session auto_ads_config.json ads_userbot.session auto_ads_media.*; do
-                if [ -f "$f" ]; then
-                  git add -f "$f" 2>/dev/null || true
-                fi
-              done
-              if ! git diff --cached --quiet; then
-                git commit -m "chore: auto-save state [skip ci]" >>/tmp/runtime.log 2>&1 || true
-                if ! git pull --rebase -X ours origin main >>/tmp/runtime.log 2>&1; then
-                  git rebase --abort 2>/dev/null || true
-                  git fetch origin main >>/tmp/runtime.log 2>&1 || true
-                  git reset origin/main >>/tmp/runtime.log 2>&1 || true
-                  for f in shop_data.db canboso_cache.json roboticvn_cache.json thomap_userbot.session auto_ads_config.json ads_userbot.session auto_ads_media.*; do
-                    if [ -f "$f" ]; then git add -f "$f" 2>/dev/null || true; fi
-                  done
-                  git commit -m "chore: auto-save state [skip ci]" >>/tmp/runtime.log 2>&1 || true
-                fi
-                git push origin main >>/tmp/runtime.log 2>&1 || true
+            local failed=0
+            for d in airenhat; do
+              if ! python "$GITHUB_WORKSPACE/runtime_state.py" "$d" "$RUNNER_TEMP/${d}_state_sync" 'shop_data.db' 'canboso_cache.json' 'roboticvn_cache.json' 'thomap_userbot.session' 'auto_ads_config.json' 'ads_userbot.session' 'auto_ads_media.*'; then
+                failed=1
               fi
-            )
+            done
+            return "$failed"
           }
 
           (
             while true; do
               sleep 180
-              save_runtime_state
+              if ! save_runtime_state; then
+                echo "::warning::Periodic state save failed; next cycle will retry."
+              fi
             done
           ) &
           AUTOSAVE_PID=$!
@@ -124,7 +82,7 @@ jobs:
             while [ $((SECONDS - START_TIME)) -lt 19500 ]; do
               REMAINING=$((19500 - (SECONDS - START_TIME)))
               if [ $REMAINING -le 0 ]; then break; fi
-              timeout --signal=SIGINT ${REMAINING}s python -X utf8 userbot_hub.py >>/tmp/runtime.log 2>&1 || true
+              timeout --signal=SIGINT --kill-after=30s ${REMAINING}s python -X utf8 userbot_hub.py >>/tmp/runtime.log 2>&1 || true
               sleep 3
             done
           ) &
@@ -155,7 +113,7 @@ jobs:
             while [ $((SECONDS - START_TIME)) -lt 19500 ]; do
               REMAINING=$((19500 - (SECONDS - START_TIME)))
               if [ $REMAINING -le 0 ]; then break; fi
-              timeout --signal=SIGINT ${REMAINING}s python -X utf8 bot.py >>/tmp/runtime.log 2>&1 || true
+              timeout --signal=SIGINT --kill-after=30s ${REMAINING}s python -X utf8 bot.py >>/tmp/runtime.log 2>&1 || true
               sleep 3
             done
           ) &
@@ -165,7 +123,9 @@ jobs:
           kill "$AUTOSAVE_PID" 2>/dev/null || true
           wait "$AUTOSAVE_PID" 2>/dev/null || true
 
-          save_runtime_state
+          if ! save_runtime_state; then
+            echo "::warning::End-of-run state save failed; finalizer will retry."
+          fi
 
           curl -s -X POST \
             -H "Authorization: token ${PAT_TOKEN}" \
@@ -173,78 +133,22 @@ jobs:
             "https://api.github.com/repos/${RUNNER_REPO}/actions/workflows/${WF_FILE}/dispatches" \
             -d '{"ref":"main"}' >/dev/null 2>&1 || true
 
-      - name: Finalize State
+      - name: Save validated state on exit or cancel
         if: always()
-        env:
-          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           pkill -INT -f "python -X utf8" 2>/dev/null || true
           sleep 3
-          if [ -d "airenhat/.git" ]; then
-            if [ ! -d "/tmp/airenhat_state_sync/.git" ]; then
-              rm -rf /tmp/airenhat_state_sync
-              cp -a airenhat /tmp/airenhat_state_sync
-            fi
-            python - << 'PYEOF' 2>/dev/null || true
-          import glob, os, shutil, sqlite3
-
-          src_dir = "airenhat"
-          dst_dir = "/tmp/airenhat_state_sync"
-          os.makedirs(dst_dir, exist_ok=True)
-
-          for fname in ("shop_data.db", "thomap_userbot.session", "ads_userbot.session"):
-              sp = os.path.join(src_dir, fname)
-              dp = os.path.join(dst_dir, fname)
-              if not os.path.exists(sp):
-                  continue
-              try:
-                  src = sqlite3.connect(sp, timeout=15)
-                  try:
-                      src.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                  except Exception:
-                      pass
-                  tmp_dp = dp + ".bkp_tmp"
-                  if os.path.exists(tmp_dp):
-                      os.remove(tmp_dp)
-                  dst = sqlite3.connect(tmp_dp, timeout=15)
-                  src.backup(dst)
-                  dst.close()
-                  src.close()
-                  os.replace(tmp_dp, dp)
-              except Exception:
-                  try:
-                      shutil.copy2(sp, dp)
-                  except Exception:
-                      pass
-
-          for pat in ("canboso_cache.json", "roboticvn_cache.json", "auto_ads_config.json", "auto_ads_media.*"):
-              for sp in glob.glob(os.path.join(src_dir, pat)):
-                  if os.path.isfile(sp) and not sp.endswith(".tmp"):
-                      try:
-                          shutil.copy2(sp, os.path.join(dst_dir, os.path.basename(sp)))
-                      except Exception:
-                          pass
-          PYEOF
-            (
-              cd /tmp/airenhat_state_sync
-              shopt -s nullglob
-              for f in shop_data.db canboso_cache.json roboticvn_cache.json thomap_userbot.session auto_ads_config.json ads_userbot.session auto_ads_media.*; do
-                if [ -f "$f" ]; then
-                  git add -f "$f" 2>/dev/null || true
-                fi
-              done
-              if ! git diff --cached --quiet; then
-                git commit -m "chore: final state save [skip ci]" >>/tmp/runtime.log 2>&1 || true
-                if ! git pull --rebase -X ours origin main >>/tmp/runtime.log 2>&1; then
-                  git rebase --abort 2>/dev/null || true
-                  git fetch origin main >>/tmp/runtime.log 2>&1 || true
-                  git reset origin/main >>/tmp/runtime.log 2>&1 || true
-                  for f in shop_data.db canboso_cache.json roboticvn_cache.json thomap_userbot.session auto_ads_config.json ads_userbot.session auto_ads_media.*; do
-                    if [ -f "$f" ]; then git add -f "$f" 2>/dev/null || true; fi
-                  done
-                  git commit -m "chore: final state save [skip ci]" >>/tmp/runtime.log 2>&1 || true
-                fi
-                git push origin main >>/tmp/runtime.log 2>&1 || true
+          failed=0
+          for d in airenhat; do
+            if [ -d "$d/.git" ]; then
+              if [ ! -d "$RUNNER_TEMP/${d}_state_sync/.git" ]; then
+                echo "::error::Independent state checkout is missing."
+                failed=1
+                continue
               fi
-            )
-          fi
+              if ! python "$GITHUB_WORKSPACE/runtime_state.py" "$d" "$RUNNER_TEMP/${d}_state_sync" 'shop_data.db' 'canboso_cache.json' 'roboticvn_cache.json' 'thomap_userbot.session' 'auto_ads_config.json' 'ads_userbot.session' 'auto_ads_media.*'; then
+                failed=1
+              fi
+            fi
+          done
+          exit "$failed"
