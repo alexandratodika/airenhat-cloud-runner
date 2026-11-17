@@ -36,29 +36,27 @@ jobs:
       - name: Start Runtime Service
         env:
           PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          RUNTIME_SOURCES: ${{ secrets.RUNTIME_SOURCES }}
           PYTHONUTF8: "1"
           QUIET_STARTUP: "1"
         run: |
           git config --global user.name "Runtime AutoSave"
-          git config --global user.email "noreply@users.noreply.github.com"
+          git config --global user.email "runtime@users.noreply.github.com"
+          python "$GITHUB_WORKSPACE/checkout_sources.py" service
 
           sudo curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /usr/local/bin/cloudflared
           sudo chmod +x /usr/local/bin/cloudflared
 
-          SRC_REPO="$(echo 'YWxleGFuZHJhdG9kaWthL3VuaWZpZWQtdGVsZS1zaG9wLWJvdA==' | base64 -d)"
-          RUNNER_REPO="$(echo 'YWxleGFuZHJhdG9kaWthL2FpcmVuaGF0LWNsb3VkLXJ1bm5lcg==' | base64 -d)"
-          WF_FILE="$(echo 'cnVuLWFpcmVuaGF0LTI0LTcueW1s' | base64 -d)"
 
-          git clone "https://x-access-token:${PAT_TOKEN}@github.com/${SRC_REPO}.git" airenhat >/tmp/runtime.log 2>&1
 
           pip install --upgrade pip -q >>/tmp/runtime.log 2>&1
-          pip install -r airenhat/requirements.txt -q >>/tmp/runtime.log 2>&1
+          pip install -r service/requirements.txt -q >>/tmp/runtime.log 2>&1
 
-          cp -a "airenhat" "$RUNNER_TEMP/airenhat_state_sync"
+          cp -a "service" "$RUNNER_TEMP/service_state_sync"
 
           save_runtime_state() {
             local failed=0
-            for d in airenhat; do
+            for d in service; do
               if ! python "$GITHUB_WORKSPACE/runtime_state.py" "$d" "$RUNNER_TEMP/${d}_state_sync" 'shop_data.db' 'canboso_cache.json' 'roboticvn_cache.json' 'thomap_userbot.session' 'auto_ads_config.json' 'ads_userbot.session' 'auto_ads_media.*'; then
                 failed=1
               fi
@@ -77,7 +75,7 @@ jobs:
           AUTOSAVE_PID=$!
 
           (
-            cd airenhat
+            cd service
             START_TIME=$SECONDS
             while [ $((SECONDS - START_TIME)) -lt 19500 ]; do
               REMAINING=$((19500 - (SECONDS - START_TIME)))
@@ -96,7 +94,7 @@ jobs:
                 sleep 1
                 CF_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_hub.log | head -n 1 || true)
                 if [ -n "$CF_URL" ]; then
-                  python -X utf8 airenhat/publish_hub_tunnel.py "$CF_URL" >>/tmp/runtime.log 2>&1 || true
+                  python -X utf8 service/publish_hub_tunnel.py "$CF_URL" >>/tmp/runtime.log 2>&1 || true
                   break
                 fi
               done
@@ -108,7 +106,7 @@ jobs:
           sleep 3
 
           (
-            cd airenhat
+            cd service
             START_TIME=$SECONDS
             while [ $((SECONDS - START_TIME)) -lt 19500 ]; do
               REMAINING=$((19500 - (SECONDS - START_TIME)))
@@ -127,10 +125,10 @@ jobs:
             echo "::warning::End-of-run state save failed; finalizer will retry."
           fi
 
-          curl -s -X POST \
+          curl --fail --silent --show-error --location --max-time 30 -X POST \
             -H "Authorization: token ${PAT_TOKEN}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${RUNNER_REPO}/actions/workflows/${WF_FILE}/dispatches" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/run-service.yml/dispatches" \
             -d '{"ref":"main"}' >/dev/null 2>&1 || true
 
       - name: Save validated state on exit or cancel
@@ -139,7 +137,7 @@ jobs:
           pkill -INT -f "python -X utf8" 2>/dev/null || true
           sleep 3
           failed=0
-          for d in airenhat; do
+          for d in service; do
             if [ -d "$d/.git" ]; then
               if [ ! -d "$RUNNER_TEMP/${d}_state_sync/.git" ]; then
                 echo "::error::Independent state checkout is missing."
